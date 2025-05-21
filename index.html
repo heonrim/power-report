@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>2025 年 3 月與 4 月用電與告警分析報告</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prop-types/15.8.1/prop-types.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <script src="https://unpkg.com/papaparse@latest/papaparse.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/chrono-node/1.3.11/chrono.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/recharts/2.15.0/Recharts.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background-color: #1f2937; color: #e5e7eb; font-family: 'Arial', sans-serif; }
+    .chart-container { background-color: #374151; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+    h1, h2, h3 { color: #60a5fa; }
+    p { color: #d1d5db; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    // Initializing React and dependencies
+    const { useState, useEffect } = React;
+    const {
+      BarChart, Bar, LineChart, Line, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid,
+      Tooltip, Legend, ResponsiveContainer, Treemap, Brush
+    } = Recharts;
+
+    // Defining the main App component
+    const App = () => {
+      const [data, setData] = useState(null);
+      const [loading, setLoading] = useState(true);
+
+      const loadFileData = async (fileName) => {
+        // 如果你的檔案放在 public 根目錄，就這樣 fetch
+        const res = await fetch(`/${fileName}`);
+        if (!res.ok) throw new Error(`Cannot load file ${fileName}: ${res.status}`);
+        return await res.text();
+      };
+
+      // Loading and processing CSV data
+      useEffect(() => {
+        const files = [
+          '3月份用電.csv',
+          '4月份用電.csv',
+          '3月用電warning_test-final.csv',
+          '4月用電warning_test-final.csv'
+        ];
+
+        Promise.all(files.map(file => loadFileData(file)))
+          .then(results => {
+            const [marUsage, aprUsage, marWarnings, aprWarnings] = results.map(csv => {
+              return Papa.parse(csv, {
+                header: true,
+                skipEmptyLines: true,
+                dynamicTyping: true,
+                transformHeader: header => header.trim().replace(/^"|"$/g, ''),
+                transform: value => value.trim().replace(/^"|"$/g, '')
+              }).data;
+            });
+
+            // Processing usage data
+            const processUsage = (data, month, utcOffset = 0) => {
+              return data.map(row => {
+                const time = chrono.parseDate(row['time']);
+                if (utcOffset) time.setHours(time.getHours() + utcOffset);
+                return {
+                  type: 'usage',
+                  device_id: row['device_id'],
+                  household_id: row['household_id'],
+                  name: row['name'],
+                  time: time.toISOString(),
+                  date: time.toISOString().split('T')[0],
+                  hour: time.getHours(),
+                  month,
+                  watt: Number(row['watt']) || 0,
+                  kwh: Number(row['kwh']) || (Number(row['watt']) * (1 / 60) / 1000),
+                  appliance_type: row['electric_appliance_type_name'] || '其他電器'
+                };
+              });
+            };
+
+            // Processing warning data
+            const processWarnings = (data, month) => {
+              return data.map(row => {
+                const time = chrono.parseDate(row['create_time']);
+                return {
+                  type: 'warning',
+                  device_id: row['device_id'],
+                  household_id: row['household_id'],
+                  name: row['name'],
+                  create_time: time.toISOString(),
+                  date: time.toISOString().split('T')[0],
+                  hour: time.getHours(),
+                  month,
+                  warning_id: row['warning_id'],
+                  warning_type: row['warning_type_desc'],
+                  warning_count: 1,
+                  appliance_type: row['electric_appliance_type_name']
+                };
+              });
+            };
+
+            // Combining data
+            const combinedData = [
+              ...processUsage(marUsage, 3, 8),
+              ...processUsage(aprUsage, 4),
+              ...processWarnings(marWarnings, 3),
+              ...processWarnings(aprWarnings, 4)
+            ];
+
+            setData(combinedData);
+            setLoading(false);
+          })
+          .catch(err => console.error('Error loading data:', err));
+      }, []);
+
+      if (loading) {
+        return <div className="text-center text-2xl text-blue-400 py-10">載入數據中...</div>;
+      }
+
+      // Aggregating daily kWh for Chart 1
+      const dailyKwh = data
+        .filter(d => d.type === 'usage')
+        .reduce((acc, curr) => {
+          const key = `${curr.date}-${curr.month}`;
+          acc[key] = acc[key] || { date: curr.date, month: curr.month, kwh: 0 };
+          acc[key].kwh += curr.kwh;
+          return acc;
+        }, {});
+      const chart1Data = Object.values(dailyKwh).sort((a, b) => new Date(a.date) - new Date(b.date));
+
+      // Aggregating hourly watt for Chart 2
+      const hourlyWatt = data
+        .filter(d => d.type === 'usage')
+        .reduce((acc, curr) => {
+          const key = `${curr.hour}-${curr.month}-${curr.appliance_type}`;
+          acc[key] = acc[key] || { hour: curr.hour, month: curr.month, appliance_type: curr.appliance_type, watt: 0, count: 0 };
+          acc[key].watt += curr.watt;
+          acc[key].count += 1;
+          return acc;
+        }, {});
+      const chart2Data = Object.values(hourlyWatt).map(d => ({
+        hour: d.hour,
+        month: d.month,
+        appliance_type: d.appliance_type,
+        avg_watt: d.watt / d.count
+      }));
+
+      // Aggregating appliance kWh for Chart 3
+      const applianceKwh = data
+        .filter(d => d.type === 'usage')
+        .reduce((acc, curr) => {
+          const key = `${curr.appliance_type}-${curr.month}`;
+          acc[key] = acc[key] || { appliance_type: curr.appliance_type, month: curr.month, kwh: 0 };
+          acc[key].kwh += curr.kwh;
+          return acc;
+        }, {});
+      const chart3Data = Object.values(applianceKwh);
+
+      // Filtering April 3rd data for Chart 4
+      const chart4Data = data
+        .filter(d => d.type === 'usage' && d.date === '2025-04-03' && d.appliance_type === '包藥機')
+        .map(d => ({
+          time: d.time.split('T')[1].substring(0, 5),
+          watt: d.watt
+        }));
+
+      // Aggregating daily warnings for Chart 5
+      const dailyWarnings = data
+        .filter(d => d.type === 'warning')
+        .reduce((acc, curr) => {
+          const key = `${curr.date}-${curr.appliance_type}`;
+          acc[key] = acc[key] || { date: curr.date, appliance_type: curr.appliance_type, warning_count: 0 };
+          acc[key].warning_count += curr.warning_count;
+          return acc;
+        }, {});
+      const chart5Data = Object.values(dailyWarnings);
+
+      // Aggregating warning types for Chart 6
+      const warningTypes = data
+        .filter(d => d.type === 'warning')
+        .reduce((acc, curr) => {
+          const key = `${curr.appliance_type}-${curr.warning_type}`;
+          acc[key] = acc[key] || { name: curr.appliance_type, warning_type: curr.warning_type, value: 0 };
+          acc[key].value += curr.warning_count;
+          return acc;
+        }, {});
+      const chart6Data = Object.values(warningTypes);
+
+      // Aggregating 5th floor water dispenser warnings for Chart 7
+      const chart7Data = data
+        .filter(d => d.type === 'warning' && d.device_id === 'SC54F82A135EFC')
+        .reduce((acc, curr) => {
+          const key = curr.date;
+          acc[key] = acc[key] || { date: curr.date, warning_count: 0 };
+          acc[key].warning_count += curr.warning_count;
+          return acc;
+        }, {});
+      const chart7DataSorted = Object.values(chart7Data).sort((a, b) => new Date(a.date) - new Date(b.date));
+
+      // Defining colors for charts
+      const COLORS = ['#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6'];
+
+      return (
+        <div className="container mx-auto p-6">
+          <h1 className="text-4xl font-bold text-center mb-6">2025 年 3 月與 4 月用電與告警分析報告</h1>
+          <p className="text-lg mb-8">
+            本報告分析 2025 年 3 月與 4 月的用電與告警數據，涵蓋包藥機、飲水機、冰箱等設備，揭示用電模式與異常事件。
+          </p>
+
+          {/* Chart 1: Daily Total kWh */}
+          <div className="chart-container">
+            <h2 className="text-2xl font-semibold mb-4">圖表 1：每日總用電量</h2>
+            <ResponsiveContainer width="100%" height={400}>
+              <BarChart data={chart1Data}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="date" />
+                <YAxis />
+                <Tooltip />
+                <Legend />
+                <Bar dataKey="kwh" fill="#3b82f6" name="總用電量 (kWh)" />
+                <Brush dataKey="date" height={30} stroke="#60a5fa" />
+              </BarChart>
+            </ResponsiveContainer>
+            <p>顯示 3 月與 4 月每日總用電量，4 月 3 日因包藥機異常（watt=0）導致用電量下降。</p>
+          </div>
+
+          {/* Chart 2: Hourly Watt Distribution */}
+          <div className="chart-container">
+            <h2 className="text-2xl font-semibold mb-4">圖表 2：每小時用電分佈</h2>
+            <ResponsiveContainer width="100%" height={400}>
+              <LineChart data={chart2Data}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="hour" />
+                <YAxis />
+                <Tooltip />
+                <Legend />
+                <Line type="monotone" dataKey="avg_watt" stroke="#3b82f6" name="包藥機 (W)" filter="appliance_type === '包藥機'" />
+                <Line type="monotone" dataKey="avg_watt" stroke="#ef4444" name="其他電器 (W)" filter="appliance_type === '其他電器'" />
+              </LineChart>
+            </ResponsiveContainer>
+            <p>顯示包藥機與其他電器每小時平均用電量，包藥機高峰在 6:00-18:00（150-170W）。</p>
+          </div>
+
+          {/* Chart 3: Appliance kWh Proportion */}
+          <div className="chart-container">
+            <h2 className="text-2xl font-semibold mb-4">圖表 3：設備用電比例</h2>
+            <ResponsiveContainer width="100%" height={400}>
+              <PieChart>
+                <Pie
+                  data={chart3Data}
+                  dataKey="kwh"
+                  nameKey="appliance_type"
+                  cx="50%"
+                  cy="50%"
+                  outerRadius={150}
+                  fill="#8884d8"
+                  label
+                >
+                  {chart3Data.map((entry, index) => (
+                    <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                  ))}
+                </Pie>
+                <Tooltip />
+                <Legend />
+              </PieChart>
+            </ResponsiveContainer>
+            <p>包藥機佔總用電量 &gt;95%，其他電器用電量極低。</p>
+          </div>
+
+          {/* Chart 4: April 3rd Medicine Dispenser Anomaly */}
+          <div className="chart-container">
+            <h2 className="text-2xl font-semibold mb-4">圖表 4：包藥機 4 月 3 日異常時段用電</h2>
+            <ResponsiveContainer width="100%" height={400}>
+              <LineChart data={chart4Data}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="time" />
+                <YAxis />
+                <Tooltip />
+                <Legend />
+                <Line type="monotone" dataKey="watt" stroke="#ef4444" name="用電量 (W)" />
+                <Brush dataKey="time" height={30} stroke="#60a5fa" />
+              </LineChart>
+            </ResponsiveContainer>
+            <p>聚焦 2025-04-03 18:49:00-18:51:31，包藥機用電量為 0，顯示短暫斷電。</p>
+          </div>
+
+          {/* Chart 5: Daily Warning Counts */}
+          <div className="chart-container">
+            <h2 className="text-2xl font-semibold mb-4">圖表 5：每日告警次數</h2>
+            <ResponsiveContainer width="100%" height={400}>
+              <BarChart data={chart5Data}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="date" />
+                <YAxis />
+                <Tooltip />
+                <Legend />
+                <Bar dataKey="warning_count" fill="#10b981" name="告警次數" />
+              </BarChart>
+            </ResponsiveContainer>
+            <p>顯示 5 樓飲水機高頻告警（3 月 370 筆、4 月 ~300 筆），4 月 28-30 日冰箱告警激增。</p>
+          </div>
+
+          {/* Chart 6: Warning Type Distribution */}
+          <div className="chart-container">
+            <h2 className="text-2xl font-semibold mb-4">圖表 6：告警類型與設備分佈</h2>
+            <ResponsiveContainer width="100%" height={400}>
+              <Treemap
+                data={chart6Data}
+                dataKey="value"
+                nameKey="name"
+                stroke="#fff"
+                fill="#f59e0b"
+              >
+                <Tooltip formatter={(value, name, props) => [`${value} 次`, `${props.payload.name} - ${props.payload.warning_type}`]} />
+              </Treemap>
+            </ResponsiveContainer>
+            <p>5 樓飲水機「短時間內電流過大」佔告警 &gt;80%，4 月冰箱告警集中在月末。</p>
+          </div>
+
+          {/* Chart 7: 5th Floor Water Dispenser Daily Warnings */}
+          <div className="chart-container">
+            <h2 className="text-2xl font-semibold mb-4">圖表 7：5 樓飲水機每日告警次數</h2>
+            <ResponsiveContainer width="100%" height={400}>
+              <LineChart data={chart7DataSorted}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="date" />
+                <YAxis />
+                <Tooltip />
+                <Legend />
+                <Line type="monotone" dataKey="warning_count" stroke="#8b5cf6" name="告警次數" />
+                <Brush dataKey="date" height={30} stroke="#60a5fa" />
+              </LineChart>
+            </ResponsiveContainer>
+            <p>5 樓飲水機每日告警 10-15 次，早晚高峰（7:00-12:00、19:00-22:00）尤為顯著。</p>
+          </div>
+
+          <div className="mt-8">
+            <h2 className="text-2xl font-semibold mb-4">結論</h2>
+            <p>
+              包藥機為主要耗電設備（&gt;95%），4 月 3 日異常（watt=0，2.5 分鐘）顯示短暫斷電，建議檢查供電系統。
+              5 樓飲水機高頻告警（3 月 370 筆、4 月 ~300 筆，短時間內電流過大），與早晚使用高峰相關，建議檢查加熱元件或電路。
+              4 月冰箱告警（129 筆）集中在 4 月 28-30 日，建議檢查壓縮機或電網穩定性。
+            </p>
+            <h3 className="text-xl font-semibold mt-4">有趣發現</h3>
+            <p>
+              5 樓飲水機告警 70% 集中在早晚高峰（7:00-12:00、19:00-22:00），可能因員工使用高峰導致負載過高，建議優化使用時段或升級設備。
+            </p>
+          </div>
+        </div>
+      );
+    };
+
+    // Rendering the app
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
