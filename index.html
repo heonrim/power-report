@@ -36,7 +36,7 @@
 
       const loadFileData = async (fileName) => {
         // 如果你的檔案放在 public 根目錄，就這樣 fetch
-        const res = await fetch(`/${fileName}`);
+        const res = await fetch(`./${fileName}`);
         if (!res.ok) throw new Error(`Cannot load file ${fileName}: ${res.status}`);
         return await res.text();
       };
